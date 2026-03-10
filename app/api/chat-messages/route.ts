@@ -26,8 +26,70 @@ export async function POST(req: NextRequest) {
     return new Response(JSON.stringify({ error: err }), { status: 500 })
   }
 
-  // 直接把 Dify 的流式响应透传给前端
-  return new Response(difyRes.body, {
+  const encoder = new TextEncoder()
+  const decoder = new TextDecoder()
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const reader = difyRes.body!.getReader()
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        const chunk = decoder.decode(value, { stream: true })
+        const lines = chunk.split('\n')
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const jsonStr = line.replace('data: ', '').trim()
+          if (!jsonStr || jsonStr === '[DONE]') continue
+
+          try {
+            const data = JSON.parse(jsonStr)
+
+            // 兼容多种 Dify 事件类型
+            let answer = ''
+
+            if (data.event === 'message' && data.answer) {
+              answer = data.answer
+            } else if (data.event === 'agent_message' && data.answer) {
+              answer = data.answer
+            } else if (data.event === 'text_chunk' && data.data?.text) {
+              answer = data.data.text
+            } else if (data.event === 'message_replace' && data.answer) {
+              answer = data.answer
+            }
+
+            if (answer) {
+              const normalized = JSON.stringify({
+                event: 'message',
+                answer,
+                conversation_id: data.conversation_id || '',
+              })
+              controller.enqueue(encoder.encode(`data: ${normalized}\n\n`))
+            }
+
+            // 透传 message_end，让前端获取 conversation_id
+            if (data.event === 'message_end' && data.conversation_id) {
+              const normalized = JSON.stringify({
+                event: 'message_end',
+                conversation_id: data.conversation_id,
+              })
+              controller.enqueue(encoder.encode(`data: ${normalized}\n\n`))
+            }
+
+          } catch {
+            // 跳过无法解析的行
+          }
+        }
+      }
+
+      controller.close()
+    },
+  })
+
+  return new Response(stream, {
     headers: {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
