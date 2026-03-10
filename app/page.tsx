@@ -8,15 +8,14 @@ const navItems = [
 ]
 
 const planItems = [
-  { key: 'plan1', num: 1, label: '创建百人拓展计划', icon: '👥', color: '#0D47A1', prompt: '帮我创建一个百人拓展计划' },
-  { key: 'plan2', num: 2, label: '找出高潜力客户', icon: '🎯', color: '#E65100', prompt: '帮我找出高潜力客户的方法' },
-  { key: 'plan3', num: 3, label: '学习客户跟进与沟通技巧', icon: '📚', color: '#1B5E20', prompt: '教我客户跟进与沟通技巧' },
-  { key: 'plan4', num: 4, label: '模拟一次客户洽谈', icon: '🤝', color: '#4A148C', prompt: '帮我模拟一次客户洽谈场景' },
-  { key: 'plan5', num: 5, label: '生成保险方案', icon: '📋', color: '#F57F17', prompt: '帮我生成一份保险方案' },
-  { key: 'plan6', num: 6, label: '复盘一次沟通或成交', icon: '🔄', color: '#006064', prompt: '帮我复盘一次沟通或成交过程' },
+  { key: 'plan1', num: 1, label: '创建百人拓展计划', icon: '👥', prompt: '帮我创建一个百人拓展计划' },
+  { key: 'plan2', num: 2, label: '找出高潜力客户', icon: '🎯', prompt: '帮我找出高潜力客户的方法' },
+  { key: 'plan3', num: 3, label: '学习客户跟进与沟通技巧', icon: '📚', prompt: '教我客户跟进与沟通技巧' },
+  { key: 'plan4', num: 4, label: '模拟一次客户洽谈', icon: '🤝', prompt: '帮我模拟一次客户洽谈场景' },
+  { key: 'plan5', num: 5, label: '生成保险方案', icon: '📋', prompt: '帮我生成一份保险方案' },
+  { key: 'plan6', num: 6, label: '复盘一次沟通或成交', icon: '🔄', prompt: '帮我复盘一次沟通或成交过程' },
 ]
 
-// 简单的 Markdown 转 HTML
 function renderMarkdown(text: string): string {
   return text
     .replace(/^### (.+)$/gm, '<h3>$1</h3>')
@@ -33,33 +32,20 @@ function renderMarkdown(text: string): string {
 }
 
 type Message = { role: 'user' | 'assistant'; content: string }
-type ModalInfo = { title: string; icon: string; color: string; prompt: string } | null
 
 export default function Home() {
-  const [modal, setModal] = useState<ModalInfo>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [conversationId, setConversationId] = useState('')
+  const [menuOpen, setMenuOpen] = useState(true)   // 功能菜单展开状态
+  const [chatStarted, setChatStarted] = useState(false) // 是否已开始对话
   const bottomRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, loading])
-
-  const openModal = async (title: string, icon: string, color: string, prompt: string) => {
-    setModal({ title, icon, color, prompt })
-    setMessages([])
-    setConversationId('')
-    await sendMessage(prompt, [], '')
-  }
-
-  const closeModal = () => {
-    setModal(null)
-    setMessages([])
-    setConversationId('')
-    setLoading(false)
-  }
 
   const sendMessage = async (text: string, prevMessages: Message[], convId: string) => {
     const userMsg: Message = { role: 'user', content: text }
@@ -67,6 +53,8 @@ export default function Home() {
     setMessages(newMessages)
     setInput('')
     setLoading(true)
+    setChatStarted(true)
+    setMenuOpen(false) // 发送消息后收起菜单
 
     try {
       const res = await fetch('/api/chat-messages', {
@@ -74,11 +62,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: text, conversation_id: convId }),
       })
-
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`)
-      }
-
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
       if (!res.body) throw new Error('No response body')
 
       const reader = res.body.getReader()
@@ -87,86 +71,43 @@ export default function Home() {
       let newConvId = convId
       let buffer = ''
 
-      // 先加一个空的 assistant 消息占位
       setMessages([...newMessages, { role: 'assistant', content: '' }])
 
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
-
         buffer += decoder.decode(value, { stream: true })
-
-        // 按行处理，避免截断
         const lines = buffer.split('\n')
-        buffer = lines.pop() ?? '' // 最后一行可能不完整，留着
+        buffer = lines.pop() ?? ''
 
         for (const line of lines) {
           const trimmed = line.trim()
-
-          // 跳过空行、ping、event行
-          if (!trimmed || trimmed === 'event: ping' || trimmed.startsWith('event:')) continue
+          if (!trimmed || trimmed.startsWith('event:')) continue
           if (!trimmed.startsWith('data:')) continue
-
           const jsonStr = trimmed.replace(/^data:\s*/, '')
           if (!jsonStr || jsonStr === '[DONE]') continue
-
           try {
             const data = JSON.parse(jsonStr)
-
-            // 获取 answer 字段（兼容多种事件）
             let answer = ''
-            if (data.answer) {
-              answer = data.answer
-            } else if (data.data?.text) {
-              answer = data.data.text
-            }
-
+            if (data.answer) answer = data.answer
+            else if (data.data?.text) answer = data.data.text
             if (answer) {
-              // Chatflow 是一次性返回完整内容，直接替换
-              if (data.event === 'message') {
-                assistantContent = answer
-              } else {
-                // 流式追加
-                assistantContent += answer
-              }
+              if (data.event === 'message') assistantContent = answer
+              else assistantContent += answer
               setMessages(prev => {
                 const updated = [...prev]
                 updated[updated.length - 1] = { role: 'assistant', content: assistantContent }
                 return updated
               })
             }
-
             if (data.conversation_id && !newConvId) {
               newConvId = data.conversation_id
               setConversationId(newConvId)
             }
-
-          } catch {
-            // 跳过无法解析的行
-          }
+          } catch { /* skip */ }
         }
       }
-
-      // 如果最终还是空的，说明内容在 workflow_finished 的 outputs 里
-      if (!assistantContent) {
-        // 重新扫描 buffer 里可能剩余的内容
-        const jsonStr = buffer.replace(/^data:\s*/, '').trim()
-        if (jsonStr) {
-          try {
-            const data = JSON.parse(jsonStr)
-            const answer = data.answer || data.data?.outputs?.answer || ''
-            if (answer) {
-              setMessages(prev => {
-                const updated = [...prev]
-                updated[updated.length - 1] = { role: 'assistant', content: answer }
-                return updated
-              })
-            }
-          } catch { /* ignore */ }
-        }
-      }
-
-    } catch (e) {
+    } catch {
       setMessages(prev => {
         const updated = [...prev]
         if (updated[updated.length - 1]?.role === 'assistant') {
@@ -186,156 +127,120 @@ export default function Home() {
     sendMessage(input.trim(), messages, conversationId)
   }
 
+  const handlePlanClick = (prompt: string) => {
+    sendMessage(prompt, messages, conversationId)
+  }
+
+  const handleNavClick = (prompt: string) => {
+    sendMessage(prompt, messages, conversationId)
+  }
+
   return (
     <>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700&display=swap');
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-        html, body { height: 100%; }
+        html, body { height: 100%; overflow: hidden; }
 
         .page-wrap {
-          min-height: 100vh;
+          height: 100vh;
           background: linear-gradient(135deg, #0f2027 0%, #203a43 50%, #2c5364 100%);
           font-family: 'Noto Serif SC', serif;
-          padding: 32px 20px;
-          display: flex; justify-content: center; align-items: flex-start;
+          display: flex;
+          flex-direction: column;
+          overflow: hidden;
+          position: relative;
         }
-        .container { width: 100%; max-width: 520px; animation: fadeInDown 0.6s ease both; }
 
-        .header-card {
-          background: rgba(255,255,255,0.06); backdrop-filter: blur(20px);
-          border: 1px solid rgba(255,255,255,0.12); border-radius: 20px;
-          padding: 28px 28px 24px; margin-bottom: 20px;
-          position: relative; overflow: hidden;
+        /* ===== TOP HEADER ===== */
+        .top-header {
+          flex-shrink: 0;
+          padding: 16px 20px 12px;
+          background: rgba(255,255,255,0.04);
+          border-bottom: 1px solid rgba(255,255,255,0.08);
+          backdrop-filter: blur(20px);
         }
-        .header-card::before {
-          content: ''; position: absolute; top: -40px; right: -40px;
-          width: 140px; height: 140px; border-radius: 50%;
-          background: radial-gradient(circle, rgba(100,200,255,0.15) 0%, transparent 70%);
-          animation: pulse 3s ease-in-out infinite;
+        .header-inner {
+          max-width: 640px; margin: 0 auto;
+          display: flex; align-items: center; gap: 12px;
         }
-        .header-top { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
-        .header-icon {
-          width: 44px; height: 44px; border-radius: 12px;
+        .header-logo {
+          width: 38px; height: 38px; border-radius: 10px;
           background: linear-gradient(135deg, #43e97b, #38f9d7);
           display: flex; align-items: center; justify-content: center;
-          font-size: 22px; flex-shrink: 0;
-          box-shadow: 0 4px 15px rgba(67,233,123,0.35);
+          font-size: 18px; flex-shrink: 0;
+          box-shadow: 0 3px 12px rgba(67,233,123,0.35);
         }
-        .header-sub { font-size: 11px; color: rgba(255,255,255,0.45); letter-spacing: 2px; }
-        .header-title { font-size: 13px; color: rgba(255,255,255,0.85); font-weight: 600; line-height: 1.4; }
-        .header-desc { font-size: 13px; color: rgba(255,255,255,0.55); line-height: 1.7; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 14px; }
+        .header-text { flex: 1; min-width: 0; }
+        .header-sub { font-size: 10px; color: rgba(255,255,255,0.4); letter-spacing: 2px; }
+        .header-title { font-size: 13px; color: rgba(255,255,255,0.9); font-weight: 700; }
 
-        .nav-row { display: flex; gap: 12px; margin-bottom: 20px; animation: fadeInUp 0.6s 0.1s ease both; opacity: 0; animation-fill-mode: forwards; }
-        .nav-btn {
-          flex: 1; padding: 14px 8px; border-radius: 14px;
-          border: 2px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.05);
-          backdrop-filter: blur(10px); cursor: pointer;
-          display: flex; flex-direction: column; align-items: center; gap: 6px;
-          transition: all 0.25s cubic-bezier(0.34,1.56,0.64,1);
+        /* Nav pills */
+        .nav-pills {
+          display: flex; gap: 8px; flex-shrink: 0;
         }
-        .nav-btn:hover { transform: translateY(-4px) scale(1.05); background: rgba(255,255,255,0.1); border-color: var(--btn-color); }
-        .nav-btn .nav-icon { font-size: 22px; }
-        .nav-btn .nav-label { font-size: 13px; font-weight: 700; color: rgba(255,255,255,0.8); }
-        .nav-btn:hover .nav-label { color: var(--btn-color); }
+        .nav-pill {
+          padding: 6px 12px; border-radius: 20px; border: 1.5px solid rgba(255,255,255,0.12);
+          background: rgba(255,255,255,0.05); cursor: pointer;
+          font-size: 12px; font-weight: 600; color: rgba(255,255,255,0.7);
+          font-family: 'Noto Serif SC', serif;
+          transition: all 0.2s ease; display: flex; align-items: center; gap: 4px;
+          white-space: nowrap;
+        }
+        .nav-pill:hover { border-color: var(--pill-color); color: var(--pill-color); background: rgba(255,255,255,0.08); }
 
-        .divider { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; animation: fadeInUp 0.6s 0.2s ease both; opacity: 0; animation-fill-mode: forwards; }
-        .divider-line { height: 1px; flex: 1; background: rgba(255,255,255,0.12); }
-        .divider-text { font-size: 11px; color: rgba(255,255,255,0.4); letter-spacing: 2px; }
+        /* ===== CHAT AREA ===== */
+        .chat-area {
+          flex: 1; overflow-y: auto; padding: 20px;
+          display: flex; flex-direction: column;
+        }
+        .chat-area::-webkit-scrollbar { width: 4px; }
+        .chat-area::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
 
-        .plan-list { display: flex; flex-direction: column; gap: 10px; animation: fadeInUp 0.6s 0.3s ease both; opacity: 0; animation-fill-mode: forwards; }
-        .plan-btn {
-          display: flex; align-items: center; gap: 16px;
-          padding: 16px 20px; border-radius: 14px;
-          border: 1.5px solid rgba(255,255,255,0.07); background: rgba(255,255,255,0.04);
-          backdrop-filter: blur(8px); cursor: pointer; text-align: left; width: 100%;
-          transition: all 0.25s cubic-bezier(0.34,1.56,0.64,1);
-        }
-        .plan-btn:hover { transform: translateX(8px) scale(1.02); background: rgba(255,255,255,0.08); border-color: var(--plan-color); }
-        .plan-num {
-          width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0;
-          display: flex; align-items: center; justify-content: center;
-          font-size: 14px; font-weight: 800;
-          background: rgba(255,255,255,0.1); color: var(--plan-color); transition: all 0.25s;
-        }
-        .plan-btn:hover .plan-num { background: var(--plan-color); color: #fff; }
-        .plan-icon { font-size: 20px; flex-shrink: 0; }
-        .plan-label { font-size: 14px; font-weight: 600; flex: 1; color: rgba(255,255,255,0.75); }
-        .plan-btn:hover .plan-label { color: rgba(255,255,255,0.95); }
-        .plan-arrow { font-size: 14px; color: rgba(255,255,255,0.2); transition: all 0.25s; }
-        .plan-btn:hover .plan-arrow { color: var(--plan-color); transform: translateX(4px); }
+        .chat-inner { max-width: 640px; margin: 0 auto; width: 100%; display: flex; flex-direction: column; gap: 16px; flex: 1; }
 
-        .footer { margin-top: 24px; text-align: center; font-size: 11px; color: rgba(255,255,255,0.2); letter-spacing: 1px; animation: fadeInUp 0.6s 0.45s ease both; opacity: 0; animation-fill-mode: forwards; }
+        /* Welcome screen */
+        .welcome {
+          flex: 1; display: flex; flex-direction: column;
+          align-items: center; justify-content: center;
+          text-align: center; gap: 16px; padding: 20px 0;
+          animation: fadeIn 0.5s ease;
+        }
+        .welcome-icon { font-size: 48px; }
+        .welcome-title { font-size: 20px; font-weight: 700; color: rgba(255,255,255,0.9); }
+        .welcome-desc { font-size: 13px; color: rgba(255,255,255,0.5); line-height: 1.7; max-width: 320px; }
 
-        .modal-overlay {
-          position: fixed; inset: 0; z-index: 1000;
-          background: rgba(0,0,0,0.75); backdrop-filter: blur(6px);
-          display: flex; align-items: center; justify-content: center;
-          padding: 20px; animation: fadeIn 0.25s ease;
-        }
-        .modal {
-          width: 100%; max-width: 560px; height: 80vh; max-height: 760px;
-          background: #1a2a35; border-radius: 20px;
-          border: 1px solid rgba(255,255,255,0.12);
-          box-shadow: 0 24px 80px rgba(0,0,0,0.6);
-          display: flex; flex-direction: column; overflow: hidden;
-          animation: slideUp 0.35s cubic-bezier(0.34,1.56,0.64,1);
-        }
-        .modal-header {
-          display: flex; align-items: center; gap: 12px;
-          padding: 14px 18px; background: rgba(255,255,255,0.05);
-          border-bottom: 1px solid rgba(255,255,255,0.08); flex-shrink: 0;
-        }
-        .modal-header-icon {
-          width: 34px; height: 34px; border-radius: 10px;
-          display: flex; align-items: center; justify-content: center; font-size: 17px;
-        }
-        .modal-title { font-size: 15px; font-weight: 700; color: #fff; flex: 1; }
-        .modal-close {
-          width: 28px; height: 28px; border-radius: 8px; border: none;
-          background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.6);
-          font-size: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center;
-          transition: all 0.2s;
-        }
-        .modal-close:hover { background: rgba(255,255,255,0.15); color: #fff; }
-
-        .chat-body {
-          flex: 1; overflow-y: auto; padding: 16px;
-          display: flex; flex-direction: column; gap: 14px;
-        }
-        .chat-body::-webkit-scrollbar { width: 4px; }
-        .chat-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
-
-        .msg { display: flex; gap: 8px; max-width: 92%; }
+        /* Messages */
+        .msg { display: flex; gap: 10px; max-width: 88%; animation: fadeInUp 0.3s ease; }
         .msg.user { align-self: flex-end; flex-direction: row-reverse; }
         .msg.assistant { align-self: flex-start; }
         .msg-avatar {
-          width: 28px; height: 28px; border-radius: 8px; flex-shrink: 0;
+          width: 30px; height: 30px; border-radius: 9px; flex-shrink: 0;
           display: flex; align-items: center; justify-content: center; font-size: 14px;
           background: rgba(255,255,255,0.08); margin-top: 2px;
         }
         .msg-bubble {
-          padding: 10px 14px; border-radius: 14px; font-size: 13px; line-height: 1.8;
+          padding: 10px 14px; border-radius: 16px; font-size: 13px; line-height: 1.8;
           word-break: break-word;
         }
-        .msg.user .msg-bubble { color: #fff; border-top-right-radius: 4px; }
+        .msg.user .msg-bubble {
+          background: linear-gradient(135deg, #43e97b, #38f9d7);
+          color: #0f2027; border-top-right-radius: 4px; font-weight: 500;
+        }
         .msg.assistant .msg-bubble {
-          background: rgba(255,255,255,0.07); color: rgba(255,255,255,0.88);
+          background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.88);
           border-top-left-radius: 4px;
         }
-
-        /* Markdown 样式 */
         .msg-bubble h1 { font-size: 16px; font-weight: 700; color: #fff; margin: 8px 0 6px; }
-        .msg-bubble h2 { font-size: 15px; font-weight: 700; color: rgba(255,255,255,0.95); margin: 10px 0 5px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 4px; }
+        .msg-bubble h2 { font-size: 14px; font-weight: 700; color: #fff; margin: 10px 0 5px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 4px; }
         .msg-bubble h3 { font-size: 13px; font-weight: 700; color: rgba(255,255,255,0.9); margin: 8px 0 4px; }
         .msg-bubble p { margin: 4px 0; }
         .msg-bubble ul { padding-left: 16px; margin: 4px 0; }
         .msg-bubble li { margin: 3px 0; }
         .msg-bubble strong { color: #fff; font-weight: 700; }
         .msg-bubble hr { border: none; border-top: 1px solid rgba(255,255,255,0.1); margin: 8px 0; }
-        .msg-bubble em { color: rgba(255,255,255,0.7); font-style: italic; }
 
-        .typing { display: flex; gap: 4px; align-items: center; padding: 12px 14px; }
+        .typing { display: flex; gap: 4px; align-items: center; padding: 4px 0; }
         .typing span {
           width: 6px; height: 6px; border-radius: 50%; background: rgba(255,255,255,0.4);
           animation: bounce 1.2s ease-in-out infinite;
@@ -343,132 +248,232 @@ export default function Home() {
         .typing span:nth-child(2) { animation-delay: 0.2s; }
         .typing span:nth-child(3) { animation-delay: 0.4s; }
 
-        .chat-input-row {
-          display: flex; gap: 8px; padding: 12px 16px;
-          border-top: 1px solid rgba(255,255,255,0.08); flex-shrink: 0;
+        /* ===== BOTTOM INPUT AREA ===== */
+        .bottom-area {
+          flex-shrink: 0;
+          padding: 12px 20px 20px;
           background: rgba(255,255,255,0.03);
+          border-top: 1px solid rgba(255,255,255,0.07);
+          backdrop-filter: blur(10px);
         }
+        .bottom-inner { max-width: 640px; margin: 0 auto; }
+
+        /* 浮窗菜单 */
+        .floating-menu {
+          margin-bottom: 12px;
+          overflow: hidden;
+          transition: max-height 0.4s cubic-bezier(0.4,0,0.2,1), opacity 0.3s ease;
+        }
+        .floating-menu.open { max-height: 500px; opacity: 1; }
+        .floating-menu.closed { max-height: 0; opacity: 0; }
+
+        .menu-grid {
+          display: flex; flex-direction: column; gap: 7px;
+          padding: 12px;
+          background: rgba(255,255,255,0.05);
+          border: 1px solid rgba(255,255,255,0.1);
+          border-radius: 16px;
+          backdrop-filter: blur(10px);
+        }
+        .menu-item {
+          display: flex; align-items: center; gap: 12px;
+          padding: 10px 14px; border-radius: 10px;
+          border: 1px solid rgba(255,255,255,0.07);
+          background: rgba(255,255,255,0.03);
+          cursor: pointer; transition: all 0.2s ease;
+          width: 100%;
+        }
+        .menu-item:hover { background: rgba(255,255,255,0.09); border-color: rgba(220,50,50,0.4); transform: translateX(4px); }
+        .menu-num {
+          width: 26px; height: 26px; border-radius: 7px; flex-shrink: 0;
+          display: flex; align-items: center; justify-content: center;
+          font-size: 12px; font-weight: 800;
+          background: rgba(220,50,50,0.15); color: #ff5252;
+          transition: all 0.2s;
+        }
+        .menu-item:hover .menu-num { background: #ff5252; color: #fff; }
+        .menu-icon { font-size: 16px; flex-shrink: 0; }
+        .menu-label { font-size: 13px; font-weight: 600; color: rgba(255,255,255,0.75); flex: 1; text-align: left; }
+        .menu-item:hover .menu-label { color: rgba(255,255,255,0.95); }
+        .menu-arrow { font-size: 12px; color: rgba(255,255,255,0.2); transition: all 0.2s; }
+        .menu-item:hover .menu-arrow { color: #ff5252; transform: translateX(3px); }
+
+        /* 浮窗触发按钮 */
+        .menu-toggle-row {
+          display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
+        }
+        .menu-toggle-btn {
+          display: flex; align-items: center; gap: 6px;
+          padding: 6px 14px; border-radius: 20px;
+          border: 1.5px solid rgba(255,255,255,0.15);
+          background: rgba(255,255,255,0.06);
+          cursor: pointer; transition: all 0.2s ease;
+          font-size: 12px; font-weight: 600; color: rgba(255,255,255,0.65);
+          font-family: 'Noto Serif SC', serif;
+        }
+        .menu-toggle-btn:hover { border-color: rgba(255,82,82,0.5); color: #ff5252; background: rgba(255,82,82,0.08); }
+        .menu-toggle-btn.active { border-color: rgba(255,82,82,0.6); color: #ff5252; background: rgba(255,82,82,0.1); }
+        .toggle-icon { font-size: 14px; transition: transform 0.3s ease; }
+        .menu-toggle-btn.active .toggle-icon { transform: rotate(180deg); }
+        .toggle-divider { flex: 1; height: 1px; background: rgba(255,255,255,0.07); }
+
+        /* 输入框行 */
+        .input-row { display: flex; gap: 10px; align-items: flex-end; }
         .chat-input {
-          flex: 1; background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.1);
-          border-radius: 12px; padding: 10px 14px; color: #fff; font-size: 13px;
+          flex: 1; background: rgba(255,255,255,0.08);
+          border: 1.5px solid rgba(255,255,255,0.12);
+          border-radius: 14px; padding: 12px 16px;
+          color: #fff; font-size: 14px;
           font-family: 'Noto Serif SC', serif; outline: none; resize: none;
-          transition: border-color 0.2s; line-height: 1.5;
+          transition: border-color 0.2s; line-height: 1.5; max-height: 120px;
         }
         .chat-input::placeholder { color: rgba(255,255,255,0.3); }
-        .chat-input:focus { border-color: rgba(255,255,255,0.25); }
+        .chat-input:focus { border-color: rgba(255,255,255,0.28); }
         .send-btn {
-          width: 40px; height: 40px; border-radius: 12px; border: none;
-          color: #fff; font-size: 16px; cursor: pointer; flex-shrink: 0;
+          width: 44px; height: 44px; border-radius: 13px; border: none;
+          background: linear-gradient(135deg, #43e97b, #38f9d7);
+          color: #0f2027; font-size: 17px; cursor: pointer; flex-shrink: 0;
           display: flex; align-items: center; justify-content: center;
-          transition: all 0.2s; align-self: flex-end;
+          transition: all 0.2s; font-weight: 700;
         }
-        .send-btn:hover:not(:disabled) { filter: brightness(1.15); transform: scale(1.05); }
-        .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .send-btn:hover:not(:disabled) { transform: scale(1.08); filter: brightness(1.1); }
+        .send-btn:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
 
-        @keyframes fadeInDown { from { opacity:0; transform:translateY(-20px); } to { opacity:1; transform:translateY(0); } }
-        @keyframes fadeInUp { from { opacity:0; transform:translateY(20px); } to { opacity:1; transform:translateY(0); } }
+        @keyframes fadeInDown { from { opacity:0; transform:translateY(-16px); } to { opacity:1; transform:translateY(0); } }
+        @keyframes fadeInUp { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } }
         @keyframes fadeIn { from { opacity:0; } to { opacity:1; } }
-        @keyframes slideUp { from { opacity:0; transform:translateY(30px) scale(0.96); } to { opacity:1; transform:translateY(0) scale(1); } }
-        @keyframes pulse { 0%,100% { opacity:.6; } 50% { opacity:1; } }
         @keyframes bounce { 0%,80%,100% { transform:translateY(0); } 40% { transform:translateY(-6px); } }
+        @keyframes pulse { 0%,100% { opacity:.6; } 50% { opacity:1; } }
       `}</style>
 
       <div className="page-wrap">
-        <div className="container">
-          <div className="header-card">
-            <div className="header-top">
-              <div className="header-icon">✨</div>
-              <div>
-                <div className="header-sub">智能AI代理助手</div>
-                <div className="header-title">您的专属全能伙伴与成长导师</div>
+
+        {/* 顶部 Header */}
+        <div className="top-header">
+          <div className="header-inner">
+            <div className="header-logo">✨</div>
+            <div className="header-text">
+              <div className="header-sub">INTELLIGENT AI ASSISTANT</div>
+              <div className="header-title">智能AI代理助手</div>
+            </div>
+            <div className="nav-pills">
+              {navItems.map(item => (
+                <button key={item.key} className="nav-pill"
+                  style={{ '--pill-color': item.color } as React.CSSProperties}
+                  onClick={() => handleNavClick(item.prompt)}>
+                  <span>{item.icon}</span>
+                  <span>{item.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* 对话区域 */}
+        <div className="chat-area">
+          <div className="chat-inner">
+            {!chatStarted ? (
+              <div className="welcome">
+                <div className="welcome-icon">🤖</div>
+                <div className="welcome-title">您好，我是您的专属助手</div>
+                <div className="welcome-desc">
+                  点击下方功能模块快速开始，或直接输入您的问题，我会全程陪伴您成长！
+                </div>
+              </div>
+            ) : (
+              <>
+                {messages.map((msg, i) => (
+                  <div key={i} className={`msg ${msg.role}`}>
+                    <div className="msg-avatar"
+                      style={msg.role === 'user' ? { background: 'linear-gradient(135deg,#43e97b,#38f9d7)', color: '#0f2027' } : {}}>
+                      {msg.role === 'user' ? '👤' : '🤖'}
+                    </div>
+                    <div className="msg-bubble">
+                      {msg.role === 'assistant' && !msg.content && loading && i === messages.length - 1 ? (
+                        <div className="typing"><span /><span /><span /></div>
+                      ) : msg.role === 'assistant' ? (
+                        <div dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }} />
+                      ) : (
+                        msg.content
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </>
+            )}
+            <div ref={bottomRef} />
+          </div>
+        </div>
+
+        {/* 底部输入区 */}
+        <div className="bottom-area">
+          <div className="bottom-inner">
+
+            {/* 功能菜单浮窗 */}
+            <div className={`floating-menu ${menuOpen ? 'open' : 'closed'}`}>
+              <div className="menu-grid">
+                {planItems.map(item => (
+                  <button key={item.key} className="menu-item"
+                    onClick={() => handlePlanClick(item.prompt)}>
+                    <div className="menu-num">{item.num}</div>
+                    <span className="menu-icon">{item.icon}</span>
+                    <span className="menu-label">{item.label}</span>
+                    <span className="menu-arrow">→</span>
+                  </button>
+                ))}
               </div>
             </div>
-            <div className="header-desc">欢迎使用智能AI代理助手——助力代理人在职业发展中追求卓越。</div>
-          </div>
 
-          <div className="nav-row">
-            {navItems.map(item => (
-              <button key={item.key} className="nav-btn"
-                style={{ '--btn-color': item.color } as React.CSSProperties}
-                onClick={() => openModal(item.label, item.icon, item.color, item.prompt)}>
-                <span className="nav-icon">{item.icon}</span>
-                <span className="nav-label">{item.label}</span>
+            {/* 浮窗开关 + 输入框 */}
+            <div className="menu-toggle-row">
+              <button
+                className={`menu-toggle-btn ${menuOpen ? 'active' : ''}`}
+                onClick={() => setMenuOpen(!menuOpen)}>
+                <span className="toggle-icon">⚡</span>
+                <span>功能模块</span>
+                <span style={{ fontSize: '10px', opacity: 0.7 }}>{menuOpen ? '▲' : '▼'}</span>
               </button>
-            ))}
-          </div>
-
-          <div className="divider">
-            <div className="divider-line" />
-            <span className="divider-text">功能模块</span>
-            <div className="divider-line" />
-          </div>
-
-          <div className="plan-list">
-            {planItems.map(item => (
-              <button key={item.key} className="plan-btn"
-                style={{ '--plan-color': item.color } as React.CSSProperties}
-                onClick={() => openModal(item.label, item.icon, item.color, item.prompt)}>
-                <div className="plan-num">{item.num}</div>
-                <span className="plan-icon">{item.icon}</span>
-                <span className="plan-label">{item.label}</span>
-                <span className="plan-arrow">→</span>
-              </button>
-            ))}
-          </div>
-
-          <div className="footer">智能AI代理助手 · 专业版</div>
-        </div>
-      </div>
-
-      {modal && (
-        <div className="modal-overlay"
-          onClick={e => { if (e.target === e.currentTarget) closeModal() }}>
-          <div className="modal">
-            <div className="modal-header">
-              <div className="modal-header-icon" style={{ background: modal.color + '33' }}>{modal.icon}</div>
-              <span className="modal-title">{modal.title}</span>
-              <button className="modal-close" onClick={closeModal}>✕</button>
+              <div className="toggle-divider" />
+              {chatStarted && (
+                <button
+                  onClick={() => { setMessages([]); setConversationId(''); setChatStarted(false); setMenuOpen(true); }}
+                  style={{
+                    padding: '6px 12px', borderRadius: '20px', border: '1.5px solid rgba(255,255,255,0.1)',
+                    background: 'transparent', color: 'rgba(255,255,255,0.4)', fontSize: '11px',
+                    cursor: 'pointer', fontFamily: 'inherit', transition: 'all 0.2s',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.7)')}
+                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.4)')}>
+                  🔄 新对话
+                </button>
+              )}
             </div>
 
-            <div className="chat-body">
-              {messages.map((msg, i) => (
-                <div key={i} className={`msg ${msg.role}`}>
-                  <div className="msg-avatar"
-                    style={msg.role === 'user' ? { background: modal.color } : {}}>
-                    {msg.role === 'user' ? '👤' : '🤖'}
-                  </div>
-                  <div className="msg-bubble"
-                    style={msg.role === 'user' ? { background: modal.color } : {}}>
-                    {msg.role === 'assistant' && !msg.content && loading && i === messages.length - 1 ? (
-                      <div className="typing"><span /><span /><span /></div>
-                    ) : msg.role === 'assistant' ? (
-                      <div dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }} />
-                    ) : (
-                      msg.content
-                    )}
-                  </div>
-                </div>
-              ))}
-              <div ref={bottomRef} />
-            </div>
-
-            <div className="chat-input-row">
-              <textarea className="chat-input" rows={1} placeholder="继续提问..."
+            <div className="input-row">
+              <textarea
+                ref={inputRef}
+                className="chat-input"
+                rows={1}
+                placeholder="输入您的问题，Enter 发送..."
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={e => {
                   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() }
                 }}
+                onInput={e => {
+                  const t = e.currentTarget
+                  t.style.height = 'auto'
+                  t.style.height = Math.min(t.scrollHeight, 120) + 'px'
+                }}
               />
-              <button className="send-btn" onClick={handleSend}
-                disabled={loading || !input.trim()}
-                style={{ background: modal.color }}>
+              <button className="send-btn" onClick={handleSend} disabled={loading || !input.trim()}>
                 ➤
               </button>
             </div>
+
           </div>
         </div>
-      )}
+      </div>
     </>
   )
 }
