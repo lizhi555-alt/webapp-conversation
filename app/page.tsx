@@ -16,6 +16,22 @@ const planItems = [
   { key: 'plan6', num: 6, label: '复盘一次沟通或成交', icon: '🔄', color: '#006064', prompt: '帮我复盘一次沟通或成交过程' },
 ]
 
+// 简单的 Markdown 转 HTML
+function renderMarkdown(text: string): string {
+  return text
+    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/^- (.+)$/gm, '<li>$1</li>')
+    .replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>')
+    .replace(/^---$/gm, '<hr/>')
+    .replace(/\n\n/g, '</p><p>')
+    .replace(/^(?!<[hul]|<hr)(.+)$/gm, '<p>$1</p>')
+    .replace(/<p><\/p>/g, '')
+}
+
 type Message = { role: 'user' | 'assistant'; content: string }
 type ModalInfo = { title: string; icon: string; color: string; prompt: string } | null
 
@@ -29,7 +45,7 @@ export default function Home() {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+  }, [messages, loading])
 
   const openModal = async (title: string, icon: string, color: string, prompt: string) => {
     setModal({ title, icon, color, prompt })
@@ -59,43 +75,107 @@ export default function Home() {
         body: JSON.stringify({ query: text, conversation_id: convId }),
       })
 
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`)
+      }
+
       if (!res.body) throw new Error('No response body')
 
       const reader = res.body.getReader()
       const decoder = new TextDecoder()
       let assistantContent = ''
       let newConvId = convId
+      let buffer = ''
+
+      // 先加一个空的 assistant 消息占位
       setMessages([...newMessages, { role: 'assistant', content: '' }])
 
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
 
-        const chunk = decoder.decode(value, { stream: true })
-        const lines = chunk.split('\n').filter(l => l.startsWith('data: '))
+        buffer += decoder.decode(value, { stream: true })
+
+        // 按行处理，避免截断
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? '' // 最后一行可能不完整，留着
 
         for (const line of lines) {
-          const jsonStr = line.replace('data: ', '').trim()
+          const trimmed = line.trim()
+
+          // 跳过空行、ping、event行
+          if (!trimmed || trimmed === 'event: ping' || trimmed.startsWith('event:')) continue
+          if (!trimmed.startsWith('data:')) continue
+
+          const jsonStr = trimmed.replace(/^data:\s*/, '')
           if (!jsonStr || jsonStr === '[DONE]') continue
+
           try {
             const data = JSON.parse(jsonStr)
-            if (data.event === 'message' && data.answer) {
-              assistantContent += data.answer
+
+            // 获取 answer 字段（兼容多种事件）
+            let answer = ''
+            if (data.answer) {
+              answer = data.answer
+            } else if (data.data?.text) {
+              answer = data.data.text
+            }
+
+            if (answer) {
+              // Chatflow 是一次性返回完整内容，直接替换
+              if (data.event === 'message') {
+                assistantContent = answer
+              } else {
+                // 流式追加
+                assistantContent += answer
+              }
               setMessages(prev => {
                 const updated = [...prev]
                 updated[updated.length - 1] = { role: 'assistant', content: assistantContent }
                 return updated
               })
             }
+
             if (data.conversation_id && !newConvId) {
               newConvId = data.conversation_id
               setConversationId(newConvId)
             }
-          } catch { /* skip */ }
+
+          } catch {
+            // 跳过无法解析的行
+          }
         }
       }
-    } catch {
-      setMessages(prev => [...prev, { role: 'assistant', content: '出错了，请稍后重试 😔' }])
+
+      // 如果最终还是空的，说明内容在 workflow_finished 的 outputs 里
+      if (!assistantContent) {
+        // 重新扫描 buffer 里可能剩余的内容
+        const jsonStr = buffer.replace(/^data:\s*/, '').trim()
+        if (jsonStr) {
+          try {
+            const data = JSON.parse(jsonStr)
+            const answer = data.answer || data.data?.outputs?.answer || ''
+            if (answer) {
+              setMessages(prev => {
+                const updated = [...prev]
+                updated[updated.length - 1] = { role: 'assistant', content: answer }
+                return updated
+              })
+            }
+          } catch { /* ignore */ }
+        }
+      }
+
+    } catch (e) {
+      setMessages(prev => {
+        const updated = [...prev]
+        if (updated[updated.length - 1]?.role === 'assistant') {
+          updated[updated.length - 1] = { role: 'assistant', content: '出错了，请稍后重试 😔' }
+        } else {
+          updated.push({ role: 'assistant', content: '出错了，请稍后重试 😔' })
+        }
+        return updated
+      })
     } finally {
       setLoading(false)
     }
@@ -194,7 +274,7 @@ export default function Home() {
           padding: 20px; animation: fadeIn 0.25s ease;
         }
         .modal {
-          width: 100%; max-width: 520px; height: 75vh; max-height: 700px;
+          width: 100%; max-width: 560px; height: 80vh; max-height: 760px;
           background: #1a2a35; border-radius: 20px;
           border: 1px solid rgba(255,255,255,0.12);
           box-shadow: 0 24px 80px rgba(0,0,0,0.6);
@@ -221,27 +301,41 @@ export default function Home() {
 
         .chat-body {
           flex: 1; overflow-y: auto; padding: 16px;
-          display: flex; flex-direction: column; gap: 12px;
+          display: flex; flex-direction: column; gap: 14px;
         }
         .chat-body::-webkit-scrollbar { width: 4px; }
         .chat-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
 
-        .msg { display: flex; gap: 8px; max-width: 88%; }
+        .msg { display: flex; gap: 8px; max-width: 92%; }
         .msg.user { align-self: flex-end; flex-direction: row-reverse; }
         .msg.assistant { align-self: flex-start; }
         .msg-avatar {
           width: 28px; height: 28px; border-radius: 8px; flex-shrink: 0;
           display: flex; align-items: center; justify-content: center; font-size: 14px;
-          background: rgba(255,255,255,0.08);
+          background: rgba(255,255,255,0.08); margin-top: 2px;
         }
         .msg-bubble {
-          padding: 10px 14px; border-radius: 14px; font-size: 13px; line-height: 1.7;
-          white-space: pre-wrap; word-break: break-word;
+          padding: 10px 14px; border-radius: 14px; font-size: 13px; line-height: 1.8;
+          word-break: break-word;
         }
         .msg.user .msg-bubble { color: #fff; border-top-right-radius: 4px; }
-        .msg.assistant .msg-bubble { background: rgba(255,255,255,0.07); color: rgba(255,255,255,0.88); border-top-left-radius: 4px; }
+        .msg.assistant .msg-bubble {
+          background: rgba(255,255,255,0.07); color: rgba(255,255,255,0.88);
+          border-top-left-radius: 4px;
+        }
 
-        .typing { display: flex; gap: 4px; align-items: center; height: 20px; }
+        /* Markdown 样式 */
+        .msg-bubble h1 { font-size: 16px; font-weight: 700; color: #fff; margin: 8px 0 6px; }
+        .msg-bubble h2 { font-size: 15px; font-weight: 700; color: rgba(255,255,255,0.95); margin: 10px 0 5px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 4px; }
+        .msg-bubble h3 { font-size: 13px; font-weight: 700; color: rgba(255,255,255,0.9); margin: 8px 0 4px; }
+        .msg-bubble p { margin: 4px 0; }
+        .msg-bubble ul { padding-left: 16px; margin: 4px 0; }
+        .msg-bubble li { margin: 3px 0; }
+        .msg-bubble strong { color: #fff; font-weight: 700; }
+        .msg-bubble hr { border: none; border-top: 1px solid rgba(255,255,255,0.1); margin: 8px 0; }
+        .msg-bubble em { color: rgba(255,255,255,0.7); font-style: italic; }
+
+        .typing { display: flex; gap: 4px; align-items: center; padding: 12px 14px; }
         .typing span {
           width: 6px; height: 6px; border-radius: 50%; background: rgba(255,255,255,0.4);
           animation: bounce 1.2s ease-in-out infinite;
@@ -345,9 +439,13 @@ export default function Home() {
                   </div>
                   <div className="msg-bubble"
                     style={msg.role === 'user' ? { background: modal.color } : {}}>
-                    {msg.content || (loading && i === messages.length - 1
-                      ? <div className="typing"><span/><span/><span/></div>
-                      : '')}
+                    {msg.role === 'assistant' && !msg.content && loading && i === messages.length - 1 ? (
+                      <div className="typing"><span /><span /><span /></div>
+                    ) : msg.role === 'assistant' ? (
+                      <div dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }} />
+                    ) : (
+                      msg.content
+                    )}
                   </div>
                 </div>
               ))}
@@ -358,7 +456,9 @@ export default function Home() {
               <textarea className="chat-input" rows={1} placeholder="继续提问..."
                 value={input}
                 onChange={e => setInput(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() }
+                }}
               />
               <button className="send-btn" onClick={handleSend}
                 disabled={loading || !input.trim()}
